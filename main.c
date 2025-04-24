@@ -8,15 +8,36 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
+#include <unistd.h>
 #define SDL_MAIN_USE_CALLBACKS 1  /* use the callbacks instead of main() */
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
+#define ENABLE_SOUND 1
+
+#include "minigb_apu.h"
+
+#if defined(MINIGB_APU_AUDIO_FORMAT_S16SYS)
+  #define AUDIO_SAMPLES_BYTES (AUDIO_SAMPLES*4)
+#elif defined(MINIGB_APU_AUDIO_FORMAT_S32SYS)
+  #define AUDIO_SAMPLES_BYTES (AUDIO_SAMPLES*8)
+#endif
+
+static struct minigb_apu_ctx apu;
+static audio_sample_t *samples;
+
+void audio_write(uint_fast32_t addr, uint8_t val)
+{
+  minigb_apu_audio_write(&apu, addr, val);
+}
+
+uint8_t audio_read(uint_fast32_t addr)
+{
+  return minigb_apu_audio_read(&apu, addr);
+}
+
 #include "peanut_gb.h"
-
-#define FRAME_TIME 17
-
-Uint64 last_frame;
 
 const uint8_t COLORS[4][3] = {
   { 223, 248, 209 },
@@ -25,10 +46,14 @@ const uint8_t COLORS[4][3] = {
   {   8,  24,  32 }
 };
 
-struct gb_s gb;
-FILE *fptr;
+static struct gb_s gb;
+static FILE *fptr;
 
-SDL_Texture *lcd;
+/* We will use this renderer to draw into this window every frame. */
+static SDL_Window *window = NULL;
+static SDL_Renderer *renderer = NULL;
+static SDL_Texture *lcd = NULL;
+static SDL_AudioStream *stream = NULL;
 
 uint8_t rom_read(struct gb_s *gb, const uint_fast32_t addr)
 {
@@ -64,10 +89,6 @@ void lcd_draw_line(struct gb_s *gb, const uint8_t *pixels, const uint_fast8_t li
   SDL_UnlockTexture(lcd);
 }
 
-/* We will use this renderer to draw into this window every frame. */
-static SDL_Window *window = NULL;
-static SDL_Renderer *renderer = NULL;
-
 /* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 {
@@ -82,9 +103,11 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
       return SDL_APP_FAILURE;
     }
 
-    SDL_SetAppMetadata("Example Renderer Clear", "1.0", "com.example.renderer-clear");
+    SDL_AudioSpec spec;
 
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    SDL_SetAppMetadata("PeanutGB", "1.0", "dev.danini.peanutgb");
+
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         SDL_Log("Couldn't initialize SDL: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
@@ -93,6 +116,24 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         SDL_Log("Couldn't create window/renderer: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
+
+    spec.channels = 2;
+    #if defined(MINIGB_APU_AUDIO_FORMAT_S16SYS)
+      spec.format = SDL_AUDIO_S16;
+    #elif defined(MINIGB_APU_AUDIO_FORMAT_S32SYS)
+      spec.format = SDL_AUDIO_S32;
+    #endif
+    spec.freq = AUDIO_SAMPLE_RATE;
+    stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+    samples = malloc(AUDIO_SAMPLES_BYTES);
+    memset(samples, 0, AUDIO_SAMPLES_BYTES);
+    if (!stream) {
+        SDL_Log("Couldn't create audio stream: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
+
+    /* SDL_OpenAudioDeviceStream starts the device paused. You have to tell it to start! */
+    SDL_ResumeAudioStreamDevice(stream);
 
     lcd = SDL_CreateTexture(renderer,
        SDL_PIXELFORMAT_RGB24,
@@ -114,8 +155,6 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     }
 
     gb_init_lcd(&gb, lcd_draw_line);
-
-    last_frame = SDL_GetTicks();
 
     return SDL_APP_CONTINUE;  /* carry on with the program! */
 }
@@ -152,19 +191,23 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 /* This function runs once per frame, and is the heart of the program. */
 SDL_AppResult SDL_AppIterate(void *appstate)
 {
+    Uint64 start = SDL_GetPerformanceCounter();
+
     gb_run_frame(&gb);
+
+    if (!gb.direct.frame_skip) {
+      minigb_apu_audio_callback(&apu, samples);
+      SDL_PutAudioStreamData(stream, samples, AUDIO_SAMPLES_BYTES);
+    }
 
     SDL_RenderTexture(renderer, lcd, NULL, NULL);
 
     /* put the newly-cleared rendering on the screen. */
     SDL_RenderPresent(renderer);
 
-    Uint64 time_now = SDL_GetTicks();
-    Uint64 since = time_now - last_frame;
-
-    if (since < FRAME_TIME) SDL_Delay(FRAME_TIME - since);
-
-    last_frame = SDL_GetTicks();
+    Uint64 end = SDL_GetPerformanceCounter();
+    float elapsed = (end - start) / (float)SDL_GetPerformanceFrequency();
+    usleep(fmax(0.0f, (1.0f / VERTICAL_SYNC - elapsed) * 1000000.0f));
 
     return SDL_APP_CONTINUE;  /* carry on with the program! */
 }
@@ -174,4 +217,5 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
 {
     /* SDL will clean up the window/renderer for us. */
     fclose(fptr);
+    free(samples);
 }
