@@ -14,6 +14,10 @@
 
 #include "peanut_gb.h"
 
+#define FRAME_TIME 17
+
+Uint64 last_frame;
+
 const uint8_t COLORS[4][3] = {
   { 223, 248, 209 },
   { 136, 193, 112 },
@@ -111,14 +115,36 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 
     gb_init_lcd(&gb, lcd_draw_line);
 
+    last_frame = SDL_GetTicks();
+
     return SDL_APP_CONTINUE;  /* carry on with the program! */
+}
+
+void handleKey(SDL_Keycode key, bool pressed) {
+  switch (key) {
+  case SDLK_Z:         gb.direct.joypad_bits.a      = !pressed; break;
+  case SDLK_X:         gb.direct.joypad_bits.b      = !pressed; break;
+  case SDLK_BACKSPACE: gb.direct.joypad_bits.select = !pressed; break;
+  case SDLK_RETURN:    gb.direct.joypad_bits.start  = !pressed; break;
+  case SDLK_RIGHT:     gb.direct.joypad_bits.right  = !pressed; break;
+  case SDLK_LEFT:      gb.direct.joypad_bits.left   = !pressed; break;
+  case SDLK_UP:        gb.direct.joypad_bits.up     = !pressed; break;
+  case SDLK_DOWN:      gb.direct.joypad_bits.down   = !pressed; break;
+  }
 }
 
 /* This function runs when a new event (mouse input, keypresses, etc) occurs. */
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 {
-    if (event->type == SDL_EVENT_QUIT) {
-        return SDL_APP_SUCCESS;  /* end the program, reporting success to the OS. */
+    switch (event->type) {
+    case SDL_EVENT_QUIT:
+      return SDL_APP_SUCCESS;  /* end the program, reporting success to the OS. */
+    case SDL_EVENT_KEY_DOWN:
+      handleKey(event->key.key, true);
+      break;
+    case SDL_EVENT_KEY_UP:
+      handleKey(event->key.key, false);
+      break;
     }
     return SDL_APP_CONTINUE;  /* carry on with the program! */
 }
@@ -132,6 +158,13 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
     /* put the newly-cleared rendering on the screen. */
     SDL_RenderPresent(renderer);
+
+    Uint64 time_now = SDL_GetTicks();
+    Uint64 since = time_now - last_frame;
+
+    if (since < FRAME_TIME) SDL_Delay(FRAME_TIME - since);
+
+    last_frame = SDL_GetTicks();
 
     return SDL_APP_CONTINUE;  /* carry on with the program! */
 }
